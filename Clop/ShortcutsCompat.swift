@@ -14,6 +14,6 @@ func runShortcutProcess(_ shortcut: Shortcut, _ file: String, outFile: String) -
 }
 
 func startShortcutWatcher() {
-    guard hasShortcutsDB() else { return }
+    // The shared watcher checks that the Shortcuts directory exists.
     SHM.startWatching()
 }

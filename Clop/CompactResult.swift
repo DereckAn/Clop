@@ -1,7 +1,6 @@
 import Defaults
 import Foundation
 import Lowtech
-import LowtechPro
 import os
 import SwiftUI
 import System
@@ -228,13 +227,6 @@ struct CompactResult: View {
 
                 if proError {
                     HStack {
-                        Button("Get Clop Pro") {
-                            manageLicenceInSettings()
-                        }
-                        .buttonStyle(FlatButton(color: .inverted, textColor: .mauvish, radius: 5, verticalPadding: 2))
-                        .font(.round(10, weight: .heavy))
-                        .colorMultiply(.mauvish.blended(withFraction: 0.8, of: .white))
-                        Spacer()
                         Button("Never show this again") {
                             neverShowProError = true
                             hoveredOptimiserID = nil
@@ -1381,7 +1373,7 @@ struct CompactPreview: View {
 
         let proErrorOpt = Optimiser(id: Optimiser.IDs.pro, type: .unknown)
         proErrorOpt.isPreview = true
-        proErrorOpt.finish(error: "You've optimised 5 files this session", notice: "Get Clop Pro to remove the limit and unlock all features.\nRelaunch the app to reset the counter.")
+        proErrorOpt.finish(error: "Unable to optimise this file", notice: "Check the file and try again.")
 
         let noticeOpt = Optimiser(id: "notice", type: .unknown, operation: "")
         noticeOpt.finish(notice: "**Paused**\nNext clipboard event will be ignored")
@@ -1488,7 +1480,7 @@ struct CompactPreviewAllStates: View {
         let o = CompactPreview.om
         let proErrorOpt = Optimiser(id: Optimiser.IDs.pro, type: .unknown)
         proErrorOpt.isPreview = true
-        proErrorOpt.finish(error: "You've optimised 5 files this session", notice: "Get Clop Pro to remove the limit and unlock all features.\nRelaunch the app to reset the counter.")
+        proErrorOpt.finish(error: "Unable to optimise this file", notice: "Check the file and try again.")
         o.optimisers.insert(proErrorOpt)
         mainActor {
             o.failedCount += 1

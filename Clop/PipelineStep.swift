@@ -798,3 +798,24 @@ extension FilterCondition {
         return parts.isEmpty ? "" : parts.joined(separator: ", ")
     }
 }
+
+// Legacy link steps remain readable so saved pipelines fail with an explicit error.
+func expirationShortLabel(_ t: TimeInterval) -> String {
+    let s = Int(t.rounded())
+    guard s > 0 else { return "∞" }
+    if s % 86400 == 0 { return "\(s / 86400)d" }
+    if s % 3600 == 0 { return "\(s / 3600)h" }
+    return "\(max(1, s / 60))m"
+}
+
+/// Parse a duration token like "30s", "5m", "1h", "2d", "never" (the copyLinkForSending step param).
+func parseExpirationDuration(_ str: String) -> TimeInterval? {
+    let s = str.trimmingCharacters(in: .whitespaces).lowercased()
+    if s == "never" || s == "0" { return 0 }
+    let units: [(String, TimeInterval)] = [("d", 86400), ("h", 3600), ("m", 60), ("s", 1)]
+    for (suffix, mult) in units where s.hasSuffix(suffix) {
+        if let n = Double(s.dropLast(suffix.count)), n >= 0 { return n * mult }
+    }
+    if let n = Double(s), n >= 0 { return n } // bare seconds
+    return nil
+}

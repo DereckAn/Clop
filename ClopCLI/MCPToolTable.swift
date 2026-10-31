@@ -342,7 +342,7 @@ extension MCPServer {
 // Writing the steps from the server would go around the gate entirely: they would land while the
 // switch reads "off", and Clop's own watcher would pick them up and run agent-authored steps anyway.
 // Clop validates the name and the source path too, since `../../.zshrc` is a name an agent can ask
-// for, and it is the app that enforces Pro, mcpEnabled and mcpAllowScriptSteps.
+// for, and it is the app that enforces mcpEnabled and mcpAllowScriptSteps.
 
 extension MCPServer {
     /// Whether a pipeline for `type` can reach a video. No type means every type.
@@ -562,8 +562,7 @@ extension MCPServer {
 // MARK: - The table
 
 extension MCPServer {
-    static let gate = "Refused until the user allows agent changes in Clop Settings, MCP, and the whole MCP "
-        + "server needs Clop Pro. Clop's own words come back verbatim when it refuses."
+    static let gate = "Refused until the user allows agent changes in Clop Settings, MCP, and Clop's own words come back verbatim when it refuses."
 
     static let tools: [MCPTool] = [
         // --- the switch
@@ -572,8 +571,8 @@ extension MCPServer {
             description: "Ask the user to allow changes through MCP, launching Clop if it is not running. "
                 + "Clop puts an alert on screen and this waits for the answer, so call it once, in "
                 + "response to something the user asked for, and tell them to expect it. Clop refuses "
-                + "every mutating tool until they allow it; reading works either way once they have "
-                + "Clop Pro, and the choice sticks across launches until it is stopped.",
+                + "every mutating tool until they allow it; reading works either way, "
+                + "and the choice sticks across launches until it is stopped.",
             inputSchema: ["type": "object", "properties": [String: Any]()],
             handler: { _ in try startServer() }
         ),
@@ -585,7 +584,7 @@ extension MCPServer {
         ),
         MCPTool(
             name: "clop_status",
-            description: "Clop's version, whether the user has Clop Pro, whether agent changes are allowed, "
+            description: "Clop's version, whether agent changes are allowed, "
                 + "whether script steps are allowed, and where the server lives. Read this first when "
                 + "a tool has been refused.",
             inputSchema: ["type": "object", "properties": [String: Any]()],

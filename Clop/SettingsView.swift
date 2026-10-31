@@ -2158,7 +2158,6 @@ struct KeysSettingsView: View {
 }
 
 import LowtechIndie
-import LowtechPro
 import LowtechProSentry
 
 struct MadeBy: View {
@@ -2182,37 +2181,46 @@ struct MadeBy: View {
 
 struct LicenseUpdatesSettingsView: View {
     @ObservedObject var um: UpdateManager = UM
-    @ObservedObject var pm: ProManager = PM
 
     var body: some View {
-        if let pro = pm.pro, let updater = um.updater {
-            Form {
-                LicenseAndUpdatesView(pro: pro, updater: updater, appName: "Clop", changelogURL: URL(string: "https://files.lowtechguys.com/clop/changelog.html"))
+        Form {
+            Section("Updates") {
+                Text("Version: v\(Bundle.main.version)")
+                Button("Check for updates") { checkForUpdates() }
+                    .disabled(um.updater == nil)
+                Link("Release notes", destination: URL(string: "https://files.lowtechguys.com/clop/changelog.html")!)
             }
-            .formStyle(.grouped)
-            .scrollContentBackground(.hidden)
-        } else {
-            ProgressView()
-                .fill()
         }
+        .formStyle(.grouped)
+        .scrollContentBackground(.hidden)
     }
 }
 
 struct AboutSettingsView: View {
     @ObservedObject var um: UpdateManager = UM
-    @ObservedObject var pm: ProManager = PM
 
     var body: some View {
-        AboutView(
-            appName: "Clop",
-            pro: pm.pro,
-            updater: um.updater,
-            websiteURL: URL(string: "https://lowtechguys.com/clop"),
-            contactURL: URL(string: "https://lowtechguys.com/contact?app=Clop"),
-            discordURL: URL(string: "https://discord.gg/YeTuy6adXk"),
-            sourceURL: URL(string: "https://github.com/FuzzyIdeas/Clop"),
-            changelogURL: URL(string: "https://files.lowtechguys.com/clop/changelog.html")
-        )
+        VStack(spacing: 16) {
+            if let icon = NSImage(named: NSImage.applicationIconName) {
+                SwiftUI.Image(nsImage: icon)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: 128, height: 128)
+            }
+            Text("Clop").font(.largeTitle.bold())
+            Text("Version \(Bundle.main.version)").foregroundColor(.secondary)
+            Text("All features enabled")
+            Button("Check for updates") { checkForUpdates() }
+                .disabled(um.updater == nil)
+            HStack(spacing: 16) {
+                Link("Website", destination: URL(string: "https://lowtechguys.com/clop")!)
+                Link("Support", destination: URL(string: "https://lowtechguys.com/contact?app=Clop")!)
+                Link("Source", destination: URL(string: "https://github.com/FuzzyIdeas/Clop")!)
+                Link("Community", destination: URL(string: "https://discord.gg/YeTuy6adXk")!)
+            }
+            Link("Release notes", destination: URL(string: "https://files.lowtechguys.com/clop/changelog.html")!)
+            MadeBy()
+        }
         .fill()
     }
 }
@@ -2863,7 +2871,6 @@ struct GeneralSettingsView: View {
     @Default(.showMenubarIcon) var showMenubarIcon
     @Default(.useClassicMenubarIcon) var useClassicMenubarIcon
     @Default(.useGeometricMenubarIcon) var useGeometricMenubarIcon
-    @Default(.defaultLinkExpiration) var defaultLinkExpiration
     @Default(.stripMetadata) var stripMetadata
     @Default(.preserveColorMetadata) var preserveColorMetadata
     @Default(.preserveDates) var preserveDates
@@ -2922,21 +2929,6 @@ struct GeneralSettingsView: View {
                 .accessibilityLabel("Launch at login")
             Toggle("Sync settings with other Macs via iCloud", isOn: $syncSettingsCloud)
                 .searchAnchor("general.main.syncSettingsCloud", namesControl: true)
-            HStack {
-                Text("Secure send links expire after")
-                Spacer()
-                Picker("Secure send links expire after", selection: $defaultLinkExpiration) {
-                    ForEach(LINK_EXPIRATION_PRESETS, id: \.self) { preset in
-                        Text(expirationDurationLabel(preset)).tag(preset)
-                    }
-                    Divider()
-                    Text("Never").tag(LINK_EXPIRATION_NEVER)
-                }
-                .labelsHidden()
-                .frame(width: 150)
-                .searchAnchor("general.main.defaultLinkExpiration")
-            }
-
             Section(header: SectionHeader(title: "Edit with external app", subtitle: "Hand an optimised file to an editor of your choice with ⌘E or the right-click menu")) {
                 EditorAppRow(label: "Images", systemImage: "photo", key: .editorAppImage)
                     .searchAnchor("general.editwithexternalapp.editorAppImage")
@@ -3159,7 +3151,7 @@ struct SettingsView: View {
             case .pipelines: "Pipelines"
             case .automation: "Automation"
             case .mcp: "MCP"
-            case .licenseUpdates: "License & updates"
+            case .licenseUpdates: "Updates"
             case .about: "About"
             }
         }

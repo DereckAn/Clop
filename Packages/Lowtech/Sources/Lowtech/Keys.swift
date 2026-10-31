@@ -1,0 +1,1712 @@
+//
+//  Keys.swift
+//
+//
+//  Created by Alin Panaitiu on 21.01.2022.
+//
+
+import Combine
+import Defaults
+import Foundation
+import Magnet
+import os
+import Sauce
+import SwiftUI
+
+private let logger = Logger(subsystem: lowtechLogSubsystem, category: "Keys")
+
+// MARK: - KeysManager
+
+public class KeysManager: ObservableObject {
+    init() {
+        if !primaryKeyModifiers.isEmpty, !primaryKeyModifiers.sideIndependentModifiers.contains(.option) {
+            altKeyModifiers = primaryKeyModifiers + [.alt]
+        }
+
+        if !primaryKeyModifiers.isEmpty, !primaryKeyModifiers.sideIndependentModifiers.contains(.shift) {
+            rightShiftKeyModifiers = primaryKeyModifiers + [.rshift]
+            leftShiftKeyModifiers = primaryKeyModifiers + [.lshift]
+        }
+
+        if !secondaryKeyModifiers.isEmpty, !secondaryKeyModifiers.sideIndependentModifiers.contains(.option) {
+            secondaryAltKeyModifiers = secondaryKeyModifiers + [.ralt]
+        }
+
+        if !secondaryKeyModifiers.isEmpty, !secondaryKeyModifiers.sideIndependentModifiers.contains(.shift) {
+            secondaryRightShiftKeyModifiers = secondaryKeyModifiers + [.rshift]
+            secondaryLeftShiftKeyModifiers = secondaryKeyModifiers + [.lshift]
+        }
+
+        NSWorkspace.shared.notificationCenter
+            .publisher(for: NSWorkspace.activeSpaceDidChangeNotification, object: nil)
+            .debounce(for: .milliseconds(50), scheduler: RunLoop.main)
+            .sink { notification in
+                self.recheckFlags()
+            }.store(in: &observers)
+        NotificationCenter.default.publisher(for: .SauceSelectedKeyboardKeyCodesChanged)
+            .sink { [self] _ in
+                updateKeyCodes()
+            }.store(in: &observers)
+
+        // Add this new observer
+        NotificationCenter.default.publisher(for: NSTextInputContext.keyboardSelectionDidChangeNotification)
+            .sink { [self] _ in
+                updateKeyCodes()
+            }.store(in: &observers)
+
+        // Call this method to ensure key codes are set correctly on init
+        updateKeyCodes()
+    }
+
+    @Published open var primaryHotkeysRegistered = false
+    @Published open var secondaryHotkeysRegistered = false
+
+    @Published open var altHotkeysRegistered = false
+    @Published open var rightShiftHotkeysRegistered = false
+    @Published open var leftShiftHotkeysRegistered = false
+
+    @Published open var secondaryAltHotkeysRegistered = false
+    @Published open var secondaryRightShiftHotkeysRegistered = false
+    @Published open var secondaryLeftShiftHotkeysRegistered = false
+
+    @Published open var specialHotkeyRegistered = false
+    @Published open var bareHotkeysRegistered = false
+
+    open var initialized = false {
+        didSet {
+            guard initialized else { return }
+            computeKeyModifiers()
+        }
+    }
+
+    open func flagsChanged(modifierFlags: NSEvent.ModifierFlags) {
+        KM.lastModifierFlags = modifierFlags
+
+        KM.rcmd = modifierFlags.contains(.rightCommand)
+        KM.ralt = modifierFlags.contains(.rightOption)
+        KM.rshift = modifierFlags.contains(.rightShift)
+        KM.rctrl = modifierFlags.contains(.rightControl)
+
+        KM.lcmd = modifierFlags.contains(.leftCommand) || (modifierFlags.contains(.command) && !modifierFlags.contains(.rightCommand))
+        KM.lalt = modifierFlags.contains(.leftOption) || (modifierFlags.contains(.option) && !modifierFlags.contains(.rightOption))
+        KM.lshift = modifierFlags.contains(.leftShift) || (modifierFlags.contains(.shift) && !modifierFlags.contains(.rightShift))
+        KM.lctrl = modifierFlags.contains(.leftControl) || (modifierFlags.contains(.control) && !modifierFlags.contains(.rightControl))
+
+        KM.fn = modifierFlags.contains(.function)
+        KM.capsLock = modifierFlags.contains(.capsLock)
+        KM.flags = modifierFlags.triggerKeys
+
+        if testKeyCombo == nil || testKeyCombo!.key != specialKey {
+            if specialKeyModifiers.allPressed {
+                registerSpecialHotkey()
+            } else {
+                unregisterSpecialHotkey()
+            }
+        }
+
+        if primaryKeyModifiers.allPressed {
+            registerPrimaryHotkeys()
+        } else {
+            unregisterPrimaryHotkeys()
+        }
+        if secondaryKeyModifiers.allPressed {
+            registerSecondaryHotkeys()
+        } else {
+            unregisterSecondaryHotkeys()
+        }
+        if altKeyModifiers.allPressed {
+            registerAltHotkeys()
+        } else {
+            unregisterAltHotkeys()
+        }
+        if rightShiftKeyModifiers.allPressed {
+            registerRightShiftHotkeys()
+        } else {
+            unregisterRightShiftHotkeys()
+        }
+        if leftShiftKeyModifiers.allPressed {
+            registerLeftShiftHotkeys()
+        } else {
+            unregisterLeftShiftHotkeys()
+        }
+
+        if secondaryAltKeyModifiers.allPressed {
+            registerSecondaryAltHotkeys()
+        } else {
+            unregisterSecondaryAltHotkeys()
+        }
+        if secondaryRightShiftKeyModifiers.allPressed {
+            registerSecondaryRightShiftHotkeys()
+        } else {
+            unregisterSecondaryRightShiftHotkeys()
+        }
+        if secondaryLeftShiftKeyModifiers.allPressed {
+            registerSecondaryLeftShiftHotkeys()
+        } else {
+            unregisterSecondaryLeftShiftHotkeys()
+        }
+
+        guard !KM.flags.isEmpty else { return }
+        if let taps = KM.multiTap[KM.flags], let tapTime = KM.multiTapTime[KM.flags], timeSince(tapTime) <= KeysManager.MULTI_TAP_THRESHOLD_INTERVAL {
+            KM.multiTap[KM.flags] = taps + 1
+            KM.multiTapPublisher.send((KM.flags, taps + 1))
+        } else {
+            KM.multiTap[KM.flags] = 1
+            KM.multiTapPublisher.send((KM.flags, 1))
+        }
+        KM.multiTapTime[KM.flags] = Date()
+
+        onFlagsChanged?(modifierFlags)
+    }
+
+    open func registerSpecialHotkey() {
+        onRegisterSpecialHotkey?()
+
+        guard let specialHotkey, !specialHotkeyRegistered, !SWIFTUI_PREVIEW else { return }
+        specialHotkey.register()
+        specialHotkeyRegistered = true
+    }
+
+    open func unregisterSpecialHotkey() {
+        onUnregisterSpecialHotkey?()
+
+        guard let specialHotkey, specialHotkeyRegistered else { return }
+        specialHotkey.unregister()
+        specialHotkeyRegistered = false
+    }
+
+    open func registerPrimaryHotkeys() {
+        onRegisterPrimaryHotkeys?()
+
+        guard !primaryHotkeys.isEmpty, !primaryHotkeysRegistered, !SWIFTUI_PREVIEW else { return }
+        logger.debug("registerPrimaryHotkeys")
+        primaryHotkeys.forEach { $0.register() }
+        primaryHotkeysRegistered = true
+    }
+
+    open func unregisterPrimaryHotkeys() {
+        onUnregisterPrimaryHotkeys?()
+
+        guard !primaryHotkeys.isEmpty, primaryHotkeysRegistered else { return }
+        logger.debug("unregisterPrimaryHotkeys")
+        primaryHotkeys.forEach { $0.unregister() }
+        primaryHotkeysRegistered = false
+    }
+
+    open func registerSecondaryHotkeys() {
+        onRegisterSecondaryHotkeys?()
+
+        guard !secondaryHotkeys.isEmpty, !secondaryHotkeysRegistered, !SWIFTUI_PREVIEW else { return }
+        secondaryHotkeys.forEach { $0.register() }
+        secondaryHotkeysRegistered = true
+    }
+
+    open func unregisterSecondaryHotkeys() {
+        onUnregisterSecondaryHotkeys?()
+
+        guard !secondaryHotkeys.isEmpty, secondaryHotkeysRegistered else { return }
+        secondaryHotkeys.forEach { $0.unregister() }
+        secondaryHotkeysRegistered = false
+    }
+
+    open func registerRightShiftHotkeys() {
+        onRegisterRightShiftHotkeys?()
+
+        guard !rightShiftHotkeys.isEmpty, !rightShiftHotkeysRegistered, !rightShiftHotkeys.isEmpty, !SWIFTUI_PREVIEW else { return }
+        rightShiftHotkeys.forEach { $0.register() }
+        rightShiftHotkeysRegistered = true
+    }
+
+    open func unregisterRightShiftHotkeys() {
+        onUnregisterRightShiftHotkeys?()
+
+        guard !rightShiftHotkeys.isEmpty, rightShiftHotkeysRegistered else { return }
+        rightShiftHotkeys.forEach { $0.unregister() }
+        rightShiftHotkeysRegistered = false
+    }
+
+    open func registerLeftShiftHotkeys() {
+        onRegisterLeftShiftHotkeys?()
+
+        guard !leftShiftHotkeys.isEmpty, !leftShiftHotkeysRegistered, !leftShiftHotkeys.isEmpty, !SWIFTUI_PREVIEW else { return }
+        leftShiftHotkeys.forEach { $0.register() }
+        leftShiftHotkeysRegistered = true
+    }
+
+    open func unregisterLeftShiftHotkeys() {
+        onUnregisterLeftShiftHotkeys?()
+
+        guard !leftShiftHotkeys.isEmpty, leftShiftHotkeysRegistered else { return }
+        leftShiftHotkeys.forEach { $0.unregister() }
+        leftShiftHotkeysRegistered = false
+    }
+
+    open func registerAltHotkeys() {
+        onRegisterAltHotkeys?()
+
+        guard !altHotkeys.isEmpty, !altHotkeysRegistered, !altHotkeys.isEmpty, !SWIFTUI_PREVIEW else { return }
+        for key in altHotkeys {
+            key.register()
+        }
+        altHotkeysRegistered = true
+    }
+
+    open func unregisterAltHotkeys() {
+        onUnregisterAltHotkeys?()
+
+        guard !altHotkeys.isEmpty, altHotkeysRegistered else { return }
+        altHotkeys.forEach { $0.unregister() }
+        altHotkeysRegistered = false
+    }
+
+    open func registerSecondaryRightShiftHotkeys() {
+        onRegisterSecondaryRightShiftHotkeys?()
+
+        guard !secondaryRightShiftHotkeys.isEmpty, !secondaryRightShiftHotkeysRegistered, !secondaryRightShiftHotkeys.isEmpty, !SWIFTUI_PREVIEW else { return }
+        secondaryRightShiftHotkeys.forEach { $0.register() }
+        secondaryRightShiftHotkeysRegistered = true
+    }
+
+    open func unregisterSecondaryRightShiftHotkeys() {
+        onUnregisterSecondaryRightShiftHotkeys?()
+
+        guard !secondaryRightShiftHotkeys.isEmpty, secondaryRightShiftHotkeysRegistered else { return }
+        secondaryRightShiftHotkeys.forEach { $0.unregister() }
+        secondaryRightShiftHotkeysRegistered = false
+    }
+
+    open func registerSecondaryLeftShiftHotkeys() {
+        onRegisterSecondaryLeftShiftHotkeys?()
+
+        guard !secondaryLeftShiftHotkeys.isEmpty, !secondaryLeftShiftHotkeysRegistered, !secondaryLeftShiftHotkeys.isEmpty, !SWIFTUI_PREVIEW else { return }
+        secondaryLeftShiftHotkeys.forEach { $0.register() }
+        secondaryLeftShiftHotkeysRegistered = true
+    }
+
+    open func unregisterSecondaryLeftShiftHotkeys() {
+        onUnregisterSecondaryLeftShiftHotkeys?()
+
+        guard !secondaryLeftShiftHotkeys.isEmpty, secondaryLeftShiftHotkeysRegistered else { return }
+        secondaryLeftShiftHotkeys.forEach { $0.unregister() }
+        secondaryLeftShiftHotkeysRegistered = false
+    }
+
+    open func registerSecondaryAltHotkeys() {
+        onRegisterSecondaryAltHotkeys?()
+
+        guard !secondaryAltHotkeys.isEmpty, !secondaryAltHotkeysRegistered, !secondaryAltHotkeys.isEmpty, !SWIFTUI_PREVIEW else { return }
+        secondaryAltHotkeys.forEach { $0.register() }
+        secondaryAltHotkeysRegistered = true
+    }
+
+    open func unregisterSecondaryAltHotkeys() {
+        onUnregisterSecondaryAltHotkeys?()
+
+        guard !secondaryAltHotkeys.isEmpty, secondaryAltHotkeysRegistered else { return }
+        secondaryAltHotkeys.forEach { $0.unregister() }
+        secondaryAltHotkeysRegistered = false
+    }
+
+    public var onFlagsChanged: ((NSEvent.ModifierFlags) -> Void)?
+    public var onSpecialHotkey: (() -> Void)?
+    public var onPrimaryHotkey: ((Key) -> Void)?
+    public var onSecondaryHotkey: ((Key) -> Void)?
+    public var onBareHotkey: ((Key) -> Bool)?
+
+    public var onAltHotkey: ((Key) -> Void)?
+    public var onRightShiftHotkey: ((Key) -> Void)?
+    public var onLeftShiftHotkey: ((Key) -> Void)?
+
+    public var onSecondaryAltHotkey: ((Key) -> Void)?
+    public var onSecondaryRightShiftHotkey: ((Key) -> Void)?
+    public var onSecondaryLeftShiftHotkey: ((Key) -> Void)?
+
+    public var onRegisterSpecialHotkey: (() -> Void)?
+    public var onUnregisterSpecialHotkey: (() -> Void)?
+    public var onRegisterPrimaryHotkeys: (() -> Void)?
+    public var onUnregisterPrimaryHotkeys: (() -> Void)?
+    public var onRegisterSecondaryHotkeys: (() -> Void)?
+    public var onUnregisterSecondaryHotkeys: (() -> Void)?
+
+    public var onRegisterRightShiftHotkeys: (() -> Void)?
+    public var onUnregisterRightShiftHotkeys: (() -> Void)?
+    public var onRegisterLeftShiftHotkeys: (() -> Void)?
+    public var onUnregisterLeftShiftHotkeys: (() -> Void)?
+    public var onRegisterAltHotkeys: (() -> Void)?
+    public var onUnregisterAltHotkeys: (() -> Void)?
+
+    public var onRegisterSecondaryRightShiftHotkeys: (() -> Void)?
+    public var onUnregisterSecondaryRightShiftHotkeys: (() -> Void)?
+    public var onRegisterSecondaryLeftShiftHotkeys: (() -> Void)?
+    public var onUnregisterSecondaryLeftShiftHotkeys: (() -> Void)?
+    public var onRegisterSecondaryAltHotkeys: (() -> Void)?
+    public var onUnregisterSecondaryAltHotkeys: (() -> Void)?
+
+    @Published public var rcmd = false
+    @Published public var ralt = false
+    @Published public var rshift = false
+    @Published public var rctrl = false
+    @Published public var lcmd = false
+    @Published public var lalt = false
+    @Published public var lctrl = false
+    @Published public var lshift = false
+    @Published public var fn = false
+    @Published public var capsLock = false
+    @Published public var flags = [TriggerKey]()
+    @Published public var lastModifierFlags: NSEvent.ModifierFlags = NSEvent.modifierFlags
+
+    @Published public var testKeyHandler: (() -> Void)? = nil
+    @Published public var testKeyCombo: KeyCombo? = nil
+    @Published public var testKeyPressed = false
+    @Published public var testKeyForward = false
+
+    @Published public var multiTap = [[TriggerKey]: Int]()
+    @Published public var multiTapTime = [[TriggerKey]: Date]()
+    public var multiTapPublisher = PassthroughSubject<([TriggerKey], Int), Never>()
+
+    public lazy var specialKeyIdentifier = "SPECIAL_KEY-\(specialKey?.character ?? "NO_KEY")"
+
+    public var primaryKeys: [Key] = []
+    public var secondaryKeys: [Key] = []
+
+    /// Keys registered without any modifier (e.g. plain Space). Registered for as long
+    /// as the array is non-empty, so keep the scope tight (e.g. only while hovering a UI
+    /// element) since a registered key is swallowed system-wide. The handler returns
+    /// whether it handled the key; on false the keypress is forwarded to the focused app.
+    public var bareKeys: [Key] = []
+
+    public var altKeys: [Key] = []
+    public var rightShiftKeys: [Key] = []
+    public var leftShiftKeys: [Key] = []
+
+    public var secondaryAltKeys: [Key] = []
+    public var secondaryRightShiftKeys: [Key] = []
+    public var secondaryLeftShiftKeys: [Key] = []
+
+    public var globalEventMonitor: GlobalEventMonitor!
+    public var localEventMonitor: LocalEventMonitor!
+    public var observers: Set<AnyCancellable> = []
+
+    @Published public var disabledAltKeys = false
+    @Published public var disabledRightShiftKeys = false
+    @Published public var disabledLeftShiftKeys = false
+
+    @Published public var disabledSecondaryAltKeys = false
+    @Published public var disabledSecondaryRightShiftKeys = false
+    @Published public var disabledSecondaryLeftShiftKeys = false
+
+    public lazy var specialKeyCode: CGKeyCode? = specialKey?.QWERTYKeyCode
+
+    public var keepSpecialKeyPosition = false
+
+    @Published public var testHotkey: HotKey? = nil {
+        didSet {
+            if let testHotkey, oldValue == nil {
+                testHotkey.register()
+            }
+            if let oldValue, testHotkey == nil {
+                oldValue.unregister()
+            }
+        }
+    }
+
+    @Published public var altKeyModifiers: [TriggerKey] = [] {
+        didSet {
+            disabledAltKeys = altKeyModifiers.isEmpty
+        }
+    }
+
+    @Published public var rightShiftKeyModifiers: [TriggerKey] = [] {
+        didSet {
+            disabledRightShiftKeys = rightShiftKeyModifiers.isEmpty
+        }
+    }
+
+    @Published public var leftShiftKeyModifiers: [TriggerKey] = [] {
+        didSet {
+            disabledLeftShiftKeys = leftShiftKeyModifiers.isEmpty
+        }
+    }
+
+    @Published public var secondaryAltKeyModifiers: [TriggerKey] = [] {
+        didSet {
+            disabledSecondaryAltKeys = secondaryAltKeyModifiers.isEmpty
+        }
+    }
+
+    @Published public var secondaryRightShiftKeyModifiers: [TriggerKey] = [] {
+        didSet {
+            disabledSecondaryRightShiftKeys = secondaryRightShiftKeyModifiers.isEmpty
+        }
+    }
+
+    @Published public var secondaryLeftShiftKeyModifiers: [TriggerKey] = [] {
+        didSet {
+            disabledSecondaryLeftShiftKeys = secondaryLeftShiftKeyModifiers.isEmpty
+        }
+    }
+
+    @Published public var primaryKeyModifiers: [TriggerKey] = [] {
+        didSet {
+            reinitHotkeys()
+        }
+    }
+
+    @Published public var secondaryKeyModifiers: [TriggerKey] = [] {
+        didSet {
+            reinitHotkeys()
+        }
+    }
+
+    @Published public var specialKeyModifiers: [TriggerKey] = [.ralt, .rshift] {
+        didSet {
+            reinitHotkeys()
+        }
+    }
+
+    @Published public var specialKey: SauceKey? = nil {
+        didSet {
+            reinitHotkeys()
+        }
+    }
+
+    public var primaryHotkeys: [HotKey] = [] {
+        didSet {
+            guard initialized else { return }
+            oldValue.forEach { $0.unregister() }
+        }
+    }
+
+    public var secondaryHotkeys: [HotKey] = [] {
+        didSet {
+            guard initialized else { return }
+            oldValue.forEach { $0.unregister() }
+        }
+    }
+
+    public var altHotkeys: [HotKey] = [] {
+        didSet {
+            guard initialized else { return }
+            oldValue.forEach { $0.unregister() }
+        }
+    }
+
+    public var rightShiftHotkeys: [HotKey] = [] {
+        didSet {
+            guard initialized else { return }
+            oldValue.forEach { $0.unregister() }
+        }
+    }
+
+    public var leftShiftHotkeys: [HotKey] = [] {
+        didSet {
+            guard initialized else { return }
+            oldValue.forEach { $0.unregister() }
+        }
+    }
+
+    public var secondaryAltHotkeys: [HotKey] = [] {
+        didSet {
+            guard initialized else { return }
+            oldValue.forEach { $0.unregister() }
+        }
+    }
+
+    public var secondaryRightShiftHotkeys: [HotKey] = [] {
+        didSet {
+            guard initialized else { return }
+            oldValue.forEach { $0.unregister() }
+        }
+    }
+
+    public var secondaryLeftShiftHotkeys: [HotKey] = [] {
+        didSet {
+            guard initialized else { return }
+            oldValue.forEach { $0.unregister() }
+        }
+    }
+
+    public var specialHotkey: HotKey? {
+        didSet {
+            guard initialized else { return }
+            oldValue?.unregister()
+        }
+    }
+
+    public var bareHotkeys: [HotKey] = [] {
+        didSet {
+            guard initialized else { return }
+            oldValue.forEach { $0.unregister() }
+        }
+    }
+
+    public func reinitHotkeys() {
+        guard initialized else { return }
+        unregisterPrimaryHotkeys()
+        unregisterSecondaryHotkeys()
+
+        unregisterAltHotkeys()
+        unregisterRightShiftHotkeys()
+        unregisterLeftShiftHotkeys()
+
+        unregisterSecondaryAltHotkeys()
+        unregisterSecondaryRightShiftHotkeys()
+        unregisterSecondaryLeftShiftHotkeys()
+
+        unregisterSpecialHotkey()
+        unregisterBareHotkeys()
+        computeKeyModifiers()
+        specialKeyIdentifier = "SPECIAL_KEY-\(specialKey?.character ?? "NO_KEY")"
+        initHotkeys()
+    }
+
+    public func computeKeyModifiers() {
+        if !primaryKeyModifiers.isEmpty, !primaryKeyModifiers.sideIndependentModifiers.contains(.option) {
+            altKeyModifiers = primaryKeyModifiers + [.alt]
+        } else {
+            altKeyModifiers = []
+        }
+
+        if !primaryKeyModifiers.isEmpty, !primaryKeyModifiers.sideIndependentModifiers.contains(.shift) {
+            rightShiftKeyModifiers = primaryKeyModifiers + [.rshift]
+            leftShiftKeyModifiers = primaryKeyModifiers + [.lshift]
+        } else {
+            rightShiftKeyModifiers = []
+            leftShiftKeyModifiers = []
+        }
+
+        if !secondaryKeyModifiers.isEmpty, !secondaryKeyModifiers.sideIndependentModifiers.contains(.option) {
+            secondaryAltKeyModifiers = secondaryKeyModifiers + [.ralt]
+        } else {
+            secondaryAltKeyModifiers = []
+        }
+
+        if !secondaryKeyModifiers.isEmpty, !secondaryKeyModifiers.sideIndependentModifiers.contains(.shift) {
+            secondaryRightShiftKeyModifiers = secondaryKeyModifiers + [.rshift]
+            secondaryLeftShiftKeyModifiers = secondaryKeyModifiers + [.lshift]
+        } else {
+            secondaryRightShiftKeyModifiers = []
+            secondaryLeftShiftKeyModifiers = []
+        }
+    }
+
+    public func initHotkeys() {
+        computeKeyModifiers()
+        initSpecialHotkeys()
+        initPrimaryHotkeys()
+        initSecondaryHotkeys()
+
+        initAltHotkeys()
+        initRightShiftHotkeys()
+        initLeftShiftHotkeys()
+
+        initSecondaryAltHotkeys()
+        initSecondaryRightShiftHotkeys()
+        initSecondaryLeftShiftHotkeys()
+
+        initBareHotkeys()
+    }
+
+    public func initBareHotkeys() {
+        if !bareKeys.isEmpty {
+            bareHotkeys = bareKeys.compactMap { key in
+                guard let combo = KeyCombo(key: key, cocoaModifiers: [], allowEmptyModifiers: true) else {
+                    logger.error("Failed to create bare KeyCombo for \(String(describing: key))")
+                    return nil
+                }
+                return HotKey(
+                    identifier: "bare-\(key.QWERTYCharacter)",
+                    keyCombo: combo,
+                    // Synchronous queue so the handler can set forwardNextEvent on the
+                    // current event when it decides not to handle the key.
+                    actionQueue: .session,
+                    detectKeyHold: false,
+                    handler: handleBareHotkey
+                )
+            }
+            bareHotkeysRegistered = false
+            // No modifier to gate registration on (unlike the other hotkey groups which
+            // register in flagsChanged), so register for as long as the keys are set.
+            registerBareHotkeys()
+        } else {
+            bareHotkeys = []
+            bareHotkeysRegistered = false
+        }
+    }
+
+    open func registerBareHotkeys() {
+        guard !bareHotkeys.isEmpty, !bareHotkeysRegistered, !SWIFTUI_PREVIEW else { return }
+        bareHotkeys.forEach { $0.register() }
+        bareHotkeysRegistered = true
+    }
+
+    open func unregisterBareHotkeys() {
+        guard bareHotkeysRegistered else { return }
+        bareHotkeys.forEach { $0.unregister() }
+        bareHotkeysRegistered = false
+    }
+
+    @objc public func handleBareHotkey(_ hotkey: HotKey) {
+        #if DEBUG
+            print(hotkey.identifier)
+        #endif
+        guard let onBareHotkey, onBareHotkey(hotkey.keyCombo.key) else {
+            hotkey.forwardNextEvent = true
+            return
+        }
+    }
+
+    public func initSpecialHotkeys() {
+        if let specialKey, !specialKeyModifiers.isEmpty, let combo = KeyCombo(
+            key: specialKey,
+            cocoaModifiers: specialKeyModifiers.sideIndependentModifiers
+        ) {
+            specialHotkey = HotKey(
+                identifier: specialKeyIdentifier,
+                keyCombo: combo,
+                actionQueue: .main,
+                detectKeyHold: false,
+                handler: handleSpecialHotkey
+            )
+        } else {
+            specialHotkey = nil
+        }
+    }
+
+    public func initPrimaryHotkeys() {
+        if !primaryKeys.isEmpty, !primaryKeyModifiers.isEmpty {
+            primaryHotkeys = buildHotkeys(
+                for: primaryKeys,
+                modifiers: primaryKeyModifiers.sideIndependentModifiers,
+                detectKeyHold: false,
+                action: handlePrimaryHotkey
+            )
+        } else {
+            primaryHotkeys = []
+        }
+    }
+
+    public func initSecondaryHotkeys() {
+        if !secondaryKeys.isEmpty, !secondaryKeyModifiers.isEmpty {
+            secondaryHotkeys = buildHotkeys(
+                for: secondaryKeys,
+                modifiers: secondaryKeyModifiers.sideIndependentModifiers,
+                identifier: "secondary-",
+                detectKeyHold: false,
+                action: handleSecondaryHotkey
+            )
+        } else {
+            secondaryHotkeys = []
+        }
+    }
+
+    public func initAltHotkeys() {
+        if !altKeys.isEmpty, !primaryKeyModifiers.isEmpty, !primaryKeyModifiers.sideIndependentModifiers.contains(.option) {
+            altHotkeys = buildHotkeys(
+                for: altKeys,
+                modifiers: altKeyModifiers.sideIndependentModifiers,
+                identifier: "alt-",
+                detectKeyHold: false,
+                action: handleAltHotkey
+            )
+        } else {
+            altHotkeys = []
+        }
+    }
+
+    public func initRightShiftHotkeys() {
+        if !rightShiftKeys.isEmpty, !primaryKeyModifiers.isEmpty, !primaryKeyModifiers.sideIndependentModifiers.contains(.shift) {
+            rightShiftHotkeys = buildHotkeys(
+                for: rightShiftKeys,
+                modifiers: rightShiftKeyModifiers.sideIndependentModifiers,
+                identifier: "rshift-",
+                detectKeyHold: false,
+                action: handleRightShiftHotkey
+            )
+        } else {
+            rightShiftHotkeys = []
+        }
+    }
+
+    public func initLeftShiftHotkeys() {
+        if !leftShiftKeys.isEmpty, !primaryKeyModifiers.isEmpty, !primaryKeyModifiers.sideIndependentModifiers.contains(.shift) {
+            leftShiftHotkeys = buildHotkeys(
+                for: leftShiftKeys,
+                modifiers: leftShiftKeyModifiers.sideIndependentModifiers,
+                identifier: "lshift-",
+                detectKeyHold: false,
+                action: handleLeftShiftHotkey
+            )
+        } else {
+            leftShiftHotkeys = []
+        }
+    }
+
+    public func initSecondaryAltHotkeys() {
+        if !secondaryAltKeys.isEmpty, !secondaryKeyModifiers.isEmpty, !secondaryKeyModifiers.sideIndependentModifiers.contains(.option) {
+            secondaryAltHotkeys = buildHotkeys(
+                for: secondaryAltKeys,
+                modifiers: secondaryAltKeyModifiers.sideIndependentModifiers,
+                identifier: "secondary-alt-",
+                detectKeyHold: false,
+                action: handleSecondaryAltHotkey
+            )
+        } else {
+            secondaryAltHotkeys = []
+        }
+    }
+
+    public func initSecondaryRightShiftHotkeys() {
+        if !secondaryRightShiftKeys.isEmpty, !secondaryKeyModifiers.isEmpty, !secondaryKeyModifiers.sideIndependentModifiers.contains(.shift) {
+            secondaryRightShiftHotkeys = buildHotkeys(
+                for: secondaryRightShiftKeys,
+                modifiers: secondaryRightShiftKeyModifiers.sideIndependentModifiers,
+                identifier: "secondary-rshift-",
+                detectKeyHold: false,
+                action: handleSecondaryRightShiftHotkey
+            )
+        } else {
+            secondaryRightShiftHotkeys = []
+        }
+    }
+
+    public func initSecondaryLeftShiftHotkeys() {
+        if !secondaryLeftShiftKeys.isEmpty, !secondaryKeyModifiers.isEmpty, !secondaryKeyModifiers.sideIndependentModifiers.contains(.shift) {
+            secondaryLeftShiftHotkeys = buildHotkeys(
+                for: secondaryLeftShiftKeys,
+                modifiers: secondaryLeftShiftKeyModifiers.sideIndependentModifiers,
+                identifier: "secondary-lshift-",
+                detectKeyHold: false,
+                action: handleSecondaryLeftShiftHotkey
+            )
+        } else {
+            secondaryLeftShiftHotkeys = []
+        }
+    }
+
+    @MainActor
+    public func initFlagsListener() {
+        globalEventMonitor = GlobalEventMonitor(mask: .flagsChanged) { [self] event in
+            flagsChanged(modifierFlags: event.modifierFlags.filterUnsupportedModifiers())
+        }
+        globalEventMonitor.start()
+
+        localEventMonitor = LocalEventMonitor(mask: .flagsChanged) { [self] event in
+            flagsChanged(modifierFlags: event.modifierFlags.filterUnsupportedModifiers())
+            return event
+        }
+        localEventMonitor.start()
+    }
+
+    public func buildHotkeys(
+        for keys: [Key],
+        modifiers: NSEvent.ModifierFlags,
+        identifier: String = "",
+        detectKeyHold: Bool = false,
+        ignoredKeys: Set<Key>? = nil,
+        action: @escaping (HotKey) -> Void
+    ) -> [HotKey] {
+        guard modifiers.isNotEmpty else { return [] }
+
+        var keys = Set(keys)
+        if let ignoredKeys { keys.subtract(ignoredKeys) }
+
+        return keys.compactMap { key in
+            guard let combo = KeyCombo(key: key, cocoaModifiers: modifiers)
+            else {
+                logger.error("Failed to create KeyCombo for \(String(describing: key)) with modifiers \(String(describing: modifiers))")
+                return nil
+            }
+
+            return HotKey(
+                identifier: "\(identifier)\(key.QWERTYCharacter)",
+                keyCombo: combo,
+                actionQueue: .main,
+                detectKeyHold: detectKeyHold,
+                handler: action
+            )
+        }
+    }
+
+    @objc public func testKeyComboPressedShouldStop(hotkey: HotKey) -> Bool {
+        guard let combo = testKeyCombo, hotkey.keyCombo == combo else {
+            return false
+        }
+        testKeyPressed = true
+
+        testKeyHandler?()
+        testKeyHandler = nil
+
+        return !testKeyForward
+    }
+
+    @objc public func handleSpecialHotkey(_ hotkey: HotKey) {
+        #if DEBUG
+            print(hotkey.identifier)
+        #endif
+        guard specialKeyModifiers.allPressed else {
+            hotkey.forwardNextEvent = true
+            return
+        }
+
+        guard !testKeyComboPressedShouldStop(hotkey: hotkey) else { return }
+        onSpecialHotkey?()
+    }
+
+    @objc public func handlePrimaryHotkey(_ hotkey: HotKey) {
+        #if DEBUG
+            print(hotkey.identifier)
+        #endif
+        guard primaryKeyModifiers.allPressed else {
+            hotkey.forwardNextEvent = true
+            return
+        }
+
+        guard !testKeyComboPressedShouldStop(hotkey: hotkey) else { return }
+        onPrimaryHotkey?(hotkey.keyCombo.key)
+    }
+
+    @objc public func handleSecondaryHotkey(_ hotkey: HotKey) {
+        #if DEBUG
+            print(hotkey.identifier)
+        #endif
+        guard secondaryKeyModifiers.allPressed else {
+            hotkey.forwardNextEvent = true
+            return
+        }
+
+        guard !testKeyComboPressedShouldStop(hotkey: hotkey) else { return }
+        onSecondaryHotkey?(hotkey.keyCombo.key)
+    }
+
+    @objc public func handleAltHotkey(_ hotkey: HotKey) {
+        #if DEBUG
+            print(hotkey.identifier)
+        #endif
+        guard altKeyModifiers.allPressed else {
+            hotkey.forwardNextEvent = true
+            return
+        }
+
+        guard !testKeyComboPressedShouldStop(hotkey: hotkey) else { return }
+        onAltHotkey?(hotkey.keyCombo.key)
+    }
+
+    @objc public func handleRightShiftHotkey(_ hotkey: HotKey) {
+        #if DEBUG
+            print(hotkey.identifier)
+        #endif
+        guard rightShiftKeyModifiers.allPressed else {
+            hotkey.forwardNextEvent = true
+            return
+        }
+
+        guard !testKeyComboPressedShouldStop(hotkey: hotkey) else { return }
+        onRightShiftHotkey?(hotkey.keyCombo.key)
+    }
+
+    @objc public func handleLeftShiftHotkey(_ hotkey: HotKey) {
+        #if DEBUG
+            print(hotkey.identifier)
+        #endif
+        guard leftShiftKeyModifiers.allPressed else {
+            hotkey.forwardNextEvent = true
+            return
+        }
+
+        guard !testKeyComboPressedShouldStop(hotkey: hotkey) else { return }
+        onLeftShiftHotkey?(hotkey.keyCombo.key)
+    }
+
+    @objc public func handleSecondaryAltHotkey(_ hotkey: HotKey) {
+        #if DEBUG
+            print(hotkey.identifier)
+        #endif
+        guard secondaryAltKeyModifiers.allPressed else {
+            hotkey.forwardNextEvent = true
+            return
+        }
+
+        guard !testKeyComboPressedShouldStop(hotkey: hotkey) else { return }
+        onSecondaryAltHotkey?(hotkey.keyCombo.key)
+    }
+
+    @objc public func handleSecondaryRightShiftHotkey(_ hotkey: HotKey) {
+        #if DEBUG
+            print(hotkey.identifier)
+        #endif
+        guard secondaryRightShiftKeyModifiers.allPressed else {
+            hotkey.forwardNextEvent = true
+            return
+        }
+
+        guard !testKeyComboPressedShouldStop(hotkey: hotkey) else { return }
+        onSecondaryRightShiftHotkey?(hotkey.keyCombo.key)
+    }
+
+    @objc public func handleSecondaryLeftShiftHotkey(_ hotkey: HotKey) {
+        #if DEBUG
+            print(hotkey.identifier)
+        #endif
+        guard secondaryLeftShiftKeyModifiers.allPressed else {
+            hotkey.forwardNextEvent = true
+            return
+        }
+
+        guard !testKeyComboPressedShouldStop(hotkey: hotkey) else { return }
+        onSecondaryLeftShiftHotkey?(hotkey.keyCombo.key)
+    }
+
+    static var MULTI_TAP_THRESHOLD_INTERVAL: TimeInterval = 0.4
+
+    func recheckFlags() {
+        guard lastModifierFlags.isNotEmpty else { return }
+
+        let flags = NSEvent.modifierFlags.filterUnsupportedModifiers()
+        if flags.isEmpty || !lastModifierFlags.contains(flags) {
+            flagsChanged(modifierFlags: flags)
+        }
+    }
+
+    private func updateKeyCodes() {
+        Set<CGKeyCode>.NUMBER_KEYS = Set([
+            SauceKey.zero, SauceKey.one, SauceKey.two, SauceKey.three, SauceKey.four, SauceKey.five, SauceKey.six, SauceKey.seven, SauceKey.eight, SauceKey.nine,
+        ].map { Sauce.shared.keyCode(for: $0) })
+        Set<CGKeyCode>.FUNCTION_KEYS = Set([
+            SauceKey.f1, SauceKey.f2, SauceKey.f3, SauceKey.f4, SauceKey.f5, SauceKey.f6, SauceKey.f7, SauceKey.f8, SauceKey.f9, SauceKey.f10, SauceKey.f11, SauceKey.f12,
+            SauceKey.f13, SauceKey.f14, SauceKey.f15, SauceKey.f16, SauceKey.f17, SauceKey.f18, SauceKey.f19, SauceKey.f20,
+        ].map { Sauce.shared.keyCode(for: $0) })
+        Set<CGKeyCode>.ALPHANUMERIC_KEYS = Set([
+            SauceKey.zero, SauceKey.one, SauceKey.two, SauceKey.three, SauceKey.four, SauceKey.five, SauceKey.six, SauceKey.seven, SauceKey.eight, SauceKey.nine,
+            SauceKey.q, SauceKey.w, SauceKey.e, SauceKey.r, SauceKey.t, SauceKey.y, SauceKey.u, SauceKey.i, SauceKey.o, SauceKey.p,
+            SauceKey.a, SauceKey.s, SauceKey.d, SauceKey.f, SauceKey.g, SauceKey.h, SauceKey.j, SauceKey.k, SauceKey.l,
+            SauceKey.z, SauceKey.x, SauceKey.c, SauceKey.v, SauceKey.b, SauceKey.n, SauceKey.m,
+        ].map { Sauce.shared.keyCode(for: $0) })
+
+        Set<CGKeyCode>.SYMBOL_KEYS = Set([
+            SauceKey.equal, SauceKey.minus, SauceKey.rightBracket, SauceKey.leftBracket,
+            SauceKey.quote, SauceKey.semicolon, SauceKey.backslash, SauceKey.section,
+            SauceKey.comma, SauceKey.slash, SauceKey.period, SauceKey.grave,
+        ].map { Sauce.shared.keyCode(for: $0) })
+
+        Set<CGKeyCode>.ALPHA_KEYS = Set<CGKeyCode>.ALPHANUMERIC_KEYS.subtracting(Set<CGKeyCode>.NUMBER_KEYS)
+        Set<CGKeyCode>.ALL_KEYS = Set<CGKeyCode>.FUNCTION_KEYS.union(Set<CGKeyCode>.NUMBER_KEYS).union(Set<CGKeyCode>.ALPHANUMERIC_KEYS).union(Set<CGKeyCode>.SYMBOL_KEYS)
+
+        Set<Int>.NUMBER_KEYS = Set(Set<CGKeyCode>.NUMBER_KEYS.map { Int($0) })
+        Set<Int>.FUNCTION_KEYS = Set(Set<CGKeyCode>.FUNCTION_KEYS.map { Int($0) })
+        Set<Int>.ALPHANUMERIC_KEYS = Set(Set<CGKeyCode>.ALPHANUMERIC_KEYS.map { Int($0) })
+        Set<Int>.SYMBOL_KEYS = Set(Set<CGKeyCode>.SYMBOL_KEYS.map { Int($0) })
+        Set<Int>.ALPHA_KEYS = Set(Set<CGKeyCode>.ALPHA_KEYS.map { Int($0) })
+        Set<Int>.ALL_KEYS = Set(Set<CGKeyCode>.ALL_KEYS.map { Int($0) })
+
+        if keepSpecialKeyPosition, let specialKeyCode {
+            specialKey = Sauce.shared.key(for: specialKeyCode.i)
+        }
+
+        // clear cache on all SauceKey values
+        Set<CGKeyCode>.ALL_KEYS.compactMap { SauceKey(QWERTYKeyCode: $0.i) }.forEach { $0.memoz.cache?.clear() }
+        SauceKey.charToPhysicalKeyMapping = (SauceKey.ALL_KEYS + [.space, .return, .escape]).dict { key in
+            (key.lowercasedChar, key)
+        }
+        ALPHANUMERIC_KEYS = ALPHANUMERICS.compactMap(\.sauceKey)
+        ALPHANUMERIC_KEYS_SET = Set(ALPHANUMERIC_KEYS)
+        reinitHotkeys()
+    }
+}
+
+public let KM = KeysManager()
+
+#if os(macOS)
+    import Cocoa
+
+    public enum TriggerKey: Int, Codable, Defaults.Serializable, Comparable, Identifiable {
+        case lshift
+        case lctrl
+        case lalt
+        case lcmd
+        case rcmd
+        case ralt
+        case rctrl
+        case rshift
+
+        case cmd
+        case alt
+        case ctrl
+        case shift
+
+        case fn
+        case capsLock
+
+        public var id: Int { rawValue }
+        public var eventModifier: SwiftUI.EventModifiers {
+            switch self {
+            case .rcmd, .lcmd, .cmd:
+                .command
+            case .ralt, .lalt, .alt:
+                .option
+            case .lctrl, .rctrl, .ctrl:
+                .control
+            case .lshift, .rshift, .shift:
+                .shift
+            case .fn:
+                .function
+            case .capsLock:
+                .capsLock
+            }
+        }
+        public var modifier: NSEvent.ModifierFlags {
+            switch self {
+            case .rcmd:
+                .rightCommand
+            case .ralt:
+                .rightOption
+            case .lcmd:
+                .leftCommand
+            case .lalt:
+                .leftOption
+            case .lctrl:
+                .leftControl
+            case .lshift:
+                .leftShift
+            case .rshift:
+                .rightShift
+            case .rctrl:
+                .rightControl
+            case .cmd:
+                .command
+            case .alt:
+                .option
+            case .ctrl:
+                .control
+            case .shift:
+                .shift
+            case .fn:
+                .function
+            case .capsLock:
+                .capsLock
+            }
+        }
+
+        public var sideIndependentModifier: NSEvent.ModifierFlags {
+            switch self {
+            case .rcmd, .lcmd, .cmd:
+                .command
+            case .ralt, .lalt, .alt:
+                .option
+            case .lctrl, .rctrl, .ctrl:
+                .control
+            case .rshift, .lshift, .shift:
+                .shift
+            case .fn:
+                .function
+            case .capsLock:
+                .capsLock
+            }
+        }
+
+        public var directionalStr: String {
+            switch self {
+            case .rcmd:
+                "⌘⃗"
+            case .ralt:
+                "⌥⃗"
+            case .lcmd:
+                "⌘⃖"
+            case .lalt:
+                "⌥⃖"
+            case .lctrl:
+                "^⃖"
+            case .lshift:
+                "⇧⃖"
+            case .rshift:
+                "⇧⃗"
+            case .rctrl:
+                "^⃗"
+            case .cmd:
+                "⌘"
+            case .alt:
+                "⌥"
+            case .ctrl:
+                "^"
+            case .shift:
+                "⇧"
+            case .fn:
+                "fn"
+            case .capsLock:
+                "⇪"
+            }
+        }
+
+        public var str: String {
+            switch self {
+            case .rcmd:
+                "⌘"
+            case .ralt:
+                "⌥"
+            case .lcmd:
+                "⌘"
+            case .lalt:
+                "⌥"
+            case .lctrl:
+                "^"
+            case .lshift:
+                "⇧"
+            case .rshift:
+                "⇧"
+            case .rctrl:
+                "^"
+            case .cmd:
+                "⌘"
+            case .alt:
+                "⌥"
+            case .ctrl:
+                "^"
+            case .shift:
+                "⇧"
+            case .fn:
+                "fn"
+            case .capsLock:
+                "⇪"
+            }
+        }
+
+        public var readableStr: String {
+            switch self {
+            case .rcmd:
+                "Right Command"
+            case .ralt:
+                "Right Option"
+            case .lcmd:
+                "Left Command"
+            case .lalt:
+                "Left Option"
+            case .lctrl:
+                "Left Control"
+            case .lshift:
+                "Left Shift"
+            case .rshift:
+                "Right Shift"
+            case .rctrl:
+                "Right Control"
+            case .cmd:
+                "Command"
+            case .alt:
+                "Option"
+            case .ctrl:
+                "Control"
+            case .shift:
+                "Shift"
+            case .fn:
+                "Fn"
+            case .capsLock:
+                "Caps Lock"
+            }
+        }
+
+        public var sideIndependentReadableStr: String {
+            switch self {
+            case .rcmd, .lcmd, .cmd:
+                "Command"
+            case .ralt, .lalt, .alt:
+                "Option"
+            case .lctrl, .rctrl, .ctrl:
+                "Control"
+            case .lshift, .rshift, .shift:
+                "Shift"
+            case .fn:
+                "Fn"
+            case .capsLock:
+                "Caps Lock"
+            }
+        }
+
+        public var shortReadableStr: String {
+            switch self {
+            case .rcmd:
+                "rcmd"
+            case .ralt:
+                "ralt"
+            case .lcmd:
+                "lcmd"
+            case .lalt:
+                "lalt"
+            case .lctrl:
+                "lctrl"
+            case .lshift:
+                "lshift"
+            case .rshift:
+                "rshift"
+            case .rctrl:
+                "rctrl"
+            case .cmd:
+                "cmd"
+            case .alt:
+                "alt"
+            case .ctrl:
+                "ctrl"
+            case .shift:
+                "shift"
+            case .fn:
+                "fn"
+            case .capsLock:
+                "caps"
+            }
+        }
+
+        public var pressed: Bool {
+            switch self {
+            case .rcmd:
+                KM.rcmd
+            case .ralt:
+                KM.ralt
+            case .lcmd:
+                KM.lcmd
+            case .lalt:
+                KM.lalt
+            case .lctrl:
+                KM.lctrl
+            case .lshift:
+                KM.lshift
+            case .rshift:
+                KM.rshift
+            case .rctrl:
+                KM.rctrl
+            case .cmd:
+                KM.rcmd || KM.lcmd
+            case .alt:
+                KM.ralt || KM.lalt
+            case .ctrl:
+                KM.rctrl || KM.lctrl
+            case .shift:
+                KM.rshift || KM.lshift
+            case .fn:
+                KM.fn
+            case .capsLock:
+                KM.capsLock
+            }
+        }
+
+        public static func < (lhs: TriggerKey, rhs: TriggerKey) -> Bool {
+            lhs.rawValue < rhs.rawValue
+        }
+    }
+
+    public extension [TriggerKey] {
+        static func == (lhs: Self, rhs: Self) -> Bool {
+            Set(lhs) == Set(rhs)
+        }
+
+        var withoutShift: [TriggerKey] { filter { $0 != .lshift && $0 != .rshift } }
+        var eventModifiers: SwiftUI.EventModifiers {
+            SwiftUI.EventModifiers(map(\.eventModifier))
+        }
+
+        var modifiers: NSEvent.ModifierFlags {
+            NSEvent.ModifierFlags(map(\.modifier))
+        }
+
+        var sideIndependentModifiers: NSEvent.ModifierFlags {
+            NSEvent.ModifierFlags(map(\.sideIndependentModifier))
+        }
+
+        var str: String { map(\.str).joined() }
+        var directionalStr: String { map(\.directionalStr).joined() }
+        var readableStr: String { map(\.readableStr).joined(separator: " + ") }
+        var shortReadableStr: String { map(\.shortReadableStr).joined(separator: "+") }
+
+        var allPressed: Bool { allSatisfy(\.pressed) }
+        var allPressedExclusive: Bool { count == KM.flags.count && allPressed }
+
+        func toggling(key: TriggerKey, on: Bool? = nil, allowShiftAlone: Bool = false) -> [TriggerKey] {
+            func clearingCapsLock(in triggers: [TriggerKey]) -> [TriggerKey] {
+                guard key != .capsLock, triggers.contains(.capsLock) else { return triggers }
+                return triggers.toggling(key: .capsLock, on: false, allowShiftAlone: allowShiftAlone)
+            }
+
+            if on ?? !contains(key) {
+                var keys = self
+                if !contains(key) {
+                    keys = keys + [key]
+                }
+                switch key {
+                case .rcmd:
+                    return clearingCapsLock(in: keys.toggling(key: TriggerKey.lcmd, on: false, allowShiftAlone: allowShiftAlone))
+                case .ralt:
+                    return clearingCapsLock(in: keys.toggling(key: TriggerKey.lalt, on: false, allowShiftAlone: allowShiftAlone))
+                case .lcmd:
+                    return clearingCapsLock(in: keys.toggling(key: TriggerKey.rcmd, on: false, allowShiftAlone: allowShiftAlone))
+                case .lalt:
+                    return clearingCapsLock(in: keys.toggling(key: TriggerKey.ralt, on: false, allowShiftAlone: allowShiftAlone))
+                case .rshift:
+                    return clearingCapsLock(in: keys.toggling(key: TriggerKey.lshift, on: false, allowShiftAlone: allowShiftAlone))
+                case .lshift:
+                    return clearingCapsLock(in: keys.toggling(key: TriggerKey.rshift, on: false, allowShiftAlone: allowShiftAlone))
+                case .rctrl:
+                    return clearingCapsLock(in: keys.toggling(key: TriggerKey.lctrl, on: false, allowShiftAlone: allowShiftAlone))
+                case .lctrl:
+                    return clearingCapsLock(in: keys.toggling(key: TriggerKey.rctrl, on: false, allowShiftAlone: allowShiftAlone))
+                case .cmd:
+                    return clearingCapsLock(in: keys.toggling(key: TriggerKey.lcmd, on: false, allowShiftAlone: allowShiftAlone).toggling(key: TriggerKey.rcmd, on: false, allowShiftAlone: allowShiftAlone))
+                case .alt:
+                    return clearingCapsLock(in: keys.toggling(key: TriggerKey.lalt, on: false, allowShiftAlone: allowShiftAlone).toggling(key: TriggerKey.ralt, on: false, allowShiftAlone: allowShiftAlone))
+                case .ctrl:
+                    return clearingCapsLock(in: keys.toggling(key: TriggerKey.lctrl, on: false, allowShiftAlone: allowShiftAlone).toggling(key: TriggerKey.rctrl, on: false, allowShiftAlone: allowShiftAlone))
+                case .shift:
+                    return clearingCapsLock(in: keys.toggling(key: TriggerKey.lshift, on: false, allowShiftAlone: allowShiftAlone).toggling(key: TriggerKey.rshift, on: false, allowShiftAlone: allowShiftAlone))
+                case .fn:
+                    return clearingCapsLock(in: keys)
+                case .capsLock:
+                    return keys
+                }
+            } else {
+                var newTriggers = filter { $0 != key }
+                if !allowShiftAlone, newTriggers.withoutShift.isEmpty {
+                    newTriggers = []
+                }
+                return clearingCapsLock(in: newTriggers)
+            }
+        }
+    }
+
+    public extension NSEvent.ModifierFlags {
+        static var uselessModifier: NSEvent.ModifierFlags { NSEvent.ModifierFlags(rawValue: 10) }
+        var triggerKeys: [TriggerKey] {
+            var flags = [TriggerKey]()
+            if contains(.leftShift) || (contains(.shift) && !contains(.rightShift)) { flags.append(.lshift) }
+            if contains(.leftControl) || (contains(.control) && !contains(.rightControl)) { flags.append(.lctrl) }
+            if contains(.leftOption) || (contains(.option) && !contains(.rightOption)) { flags.append(.lalt) }
+            if contains(.leftCommand) || (contains(.command) && !contains(.rightCommand)) { flags.append(.lcmd) }
+            if contains(.rightCommand) { flags.append(.rcmd) }
+            if contains(.rightOption) { flags.append(.ralt) }
+            if contains(.rightControl) { flags.append(.rctrl) }
+            if contains(.rightShift) { flags.append(.rshift) }
+            if contains(.function) { flags.append(.fn) }
+            // Note: capsLock is tracked manually via keycode detection, not via toggle state
+
+            return flags
+        }
+    }
+
+    public struct DirectionalModifierView: View {
+        public init(triggerKeys: Binding<[TriggerKey]>, spacing: CGFloat = 3, noFG: Bool = false, singleRow: Bool = true, showFnCaps: Bool = true, allowShiftAlone: Bool = false, spacebarFullWidth: Bool = false, radius: CGFloat = 6) {
+            _triggerKeys = triggerKeys
+            self.spacing = spacing
+            self.noFG = noFG
+            self.singleRow = singleRow
+            self.showFnCaps = showFnCaps
+            self.allowShiftAlone = allowShiftAlone
+            self.spacebarFullWidth = spacebarFullWidth
+            self.radius = radius
+        }
+
+        @Environment(\.isEnabled) public var isEnabled
+
+        public var body: some View {
+            let lshiftTrigger = Binding<Bool>(
+                get: { triggerKeys.contains(.lshift) || triggerKeys.contains(.shift) },
+                set: {
+                    triggerKeys = triggerKeys.toggling(key: TriggerKey.lshift, on: $0, allowShiftAlone: allowShiftAlone)
+                }
+            )
+            let rshiftTrigger = Binding<Bool>(
+                get: { triggerKeys.contains(.rshift) || triggerKeys.contains(.shift) },
+                set: {
+                    triggerKeys = triggerKeys.toggling(key: TriggerKey.rshift, on: $0, allowShiftAlone: allowShiftAlone)
+                }
+            )
+
+            let capsLockTrigger = Binding<Bool>(
+                get: { triggerKeys.contains(.capsLock) },
+                set: { newValue in
+                    if newValue {
+                        triggerKeys = [.capsLock]
+                    } else {
+                        triggerKeys = [.rcmd]
+                    }
+                }
+            )
+
+            if singleRow {
+                HStack(alignment: .bottom, spacing: spacing) {
+                    if showFnCaps {
+                        Button("⇪") {
+                            if triggerKeys.contains(.capsLock) {
+                                triggerKeys = [.rcmd]
+                            } else {
+                                triggerKeys = [.capsLock]
+                            }
+                        }.buttonStyle(ToggleButton(isOn: capsLockTrigger, radius: radius, noFG: noFG))
+                    }
+
+                    Button("⇧") {
+                        triggerKeys = triggerKeys.toggling(key: .lshift, allowShiftAlone: allowShiftAlone)
+                    }.buttonStyle(ToggleButton(isOn: lshiftTrigger, radius: radius, noFG: noFG))
+                    .accessibilityLabel("Left Shift")
+                        .overlay(Color.red.opacity(triggerKeys.contains(.shift) ? 0.1 : 0.0).clipShape(RoundedRectangle(cornerRadius: radius, style: .continuous)))
+
+                    commonModifiers
+
+                    Button("⇧") {
+                        triggerKeys = triggerKeys.toggling(key: .rshift, allowShiftAlone: allowShiftAlone)
+                    }.buttonStyle(ToggleButton(isOn: rshiftTrigger, radius: radius, noFG: noFG))
+                    .accessibilityLabel("Right Shift")
+                        .overlay(Color.red.opacity(triggerKeys.contains(.shift) ? 0.1 : 0.0).clipShape(RoundedRectangle(cornerRadius: radius, style: .continuous)))
+                }.disabled(!isEnabled)
+            } else {
+                VStack(alignment: .center, spacing: spacing) {
+                    if showFnCaps {
+                        HStack(spacing: spacing) {
+                            Button("⇪ capslock") {
+                                if triggerKeys.contains(.capsLock) {
+                                    triggerKeys = [.rcmd]
+                                } else {
+                                    triggerKeys = [.capsLock]
+                                }
+                            }.buttonStyle(ToggleButton(isOn: capsLockTrigger, radius: radius, noFG: noFG))
+                            Spacer()
+                        }.frame(width: commonModifiersRowSize.width)
+                    }
+
+                    HStack(alignment: .bottom, spacing: spacing) {
+                        Button("⇧ shift") {
+                            triggerKeys = triggerKeys.toggling(key: .lshift, allowShiftAlone: allowShiftAlone)
+                        }.buttonStyle(ToggleButton(isOn: lshiftTrigger, radius: radius, noFG: noFG))
+                    .accessibilityLabel("Left Shift")
+                            .overlay(Color.red.opacity(triggerKeys.contains(.shift) ? 0.1 : 0.0).clipShape(RoundedRectangle(cornerRadius: radius, style: .continuous)))
+
+                        Spacer()
+
+                        Button("⇧ shift") {
+                            triggerKeys = triggerKeys.toggling(key: .rshift, allowShiftAlone: allowShiftAlone)
+                        }.buttonStyle(ToggleButton(isOn: rshiftTrigger, radius: radius, noFG: noFG))
+                    .accessibilityLabel("Right Shift")
+                            .overlay(Color.red.opacity(triggerKeys.contains(.shift) ? 0.1 : 0.0).clipShape(RoundedRectangle(cornerRadius: radius, style: .continuous)))
+                    }.frame(width: commonModifiersRowSize.width)
+
+                    commonModifiers
+                }.disabled(!isEnabled)
+            }
+        }
+
+        @Binding var triggerKeys: [TriggerKey]
+
+        var spacing: CGFloat = 3
+        var noFG = false
+        var singleRow = true
+        var showFnCaps = true
+        var allowShiftAlone = false
+        var spacebarFullWidth = false
+        var radius: CGFloat = 6
+
+        @ViewBuilder var commonModifiers: some View {
+            let rcmdTrigger = Binding<Bool>(
+                get: { triggerKeys.contains(.rcmd) || triggerKeys.contains(.cmd) },
+                set: {
+                    triggerKeys = triggerKeys.toggling(key: TriggerKey.rcmd, on: $0, allowShiftAlone: allowShiftAlone)
+                }
+            )
+            let raltTrigger = Binding<Bool>(
+                get: { triggerKeys.contains(.ralt) || triggerKeys.contains(.alt) },
+                set: {
+                    triggerKeys = triggerKeys.toggling(key: TriggerKey.ralt, on: $0, allowShiftAlone: allowShiftAlone)
+                }
+            )
+
+            let lcmdTrigger = Binding<Bool>(
+                get: { triggerKeys.contains(.lcmd) || triggerKeys.contains(.cmd) },
+                set: {
+                    triggerKeys = triggerKeys.toggling(key: TriggerKey.lcmd, on: $0, allowShiftAlone: allowShiftAlone)
+                }
+            )
+            let laltTrigger = Binding<Bool>(
+                get: { triggerKeys.contains(.lalt) || triggerKeys.contains(.alt) },
+                set: {
+                    triggerKeys = triggerKeys.toggling(key: TriggerKey.lalt, on: $0, allowShiftAlone: allowShiftAlone)
+                }
+            )
+            let lctrlTrigger = Binding<Bool>(
+                get: { triggerKeys.contains(.lctrl) || triggerKeys.contains(.ctrl) },
+                set: {
+                    triggerKeys = triggerKeys.toggling(key: TriggerKey.lctrl, on: $0, allowShiftAlone: allowShiftAlone)
+                }
+            )
+            let rctrlTrigger = Binding<Bool>(
+                get: { triggerKeys.contains(.rctrl) || triggerKeys.contains(.ctrl) },
+                set: {
+                    triggerKeys = triggerKeys.toggling(key: TriggerKey.rctrl, on: $0, allowShiftAlone: allowShiftAlone)
+                }
+            )
+            let fnTrigger = Binding<Bool>(
+                get: { triggerKeys.contains(.fn) },
+                set: {
+                    triggerKeys = triggerKeys.toggling(key: TriggerKey.fn, on: $0, allowShiftAlone: allowShiftAlone)
+                }
+            )
+
+            HStack(spacing: spacing) {
+                if showFnCaps {
+                    Button("fn") {
+                        triggerKeys = triggerKeys.toggling(key: .fn, allowShiftAlone: allowShiftAlone)
+                    }.buttonStyle(ToggleButton(isOn: fnTrigger, radius: radius, noFG: noFG))
+                }
+
+                Button("⌃") {
+                    triggerKeys = triggerKeys.toggling(key: .lctrl, allowShiftAlone: allowShiftAlone)
+                }.buttonStyle(ToggleButton(isOn: lctrlTrigger, radius: radius, noFG: noFG))
+                    .accessibilityLabel("Left Control")
+                    .overlay(Color.red.opacity(triggerKeys.contains(.ctrl) ? 0.1 : 0.0).clipShape(RoundedRectangle(cornerRadius: radius, style: .continuous)))
+                Button("⌥") {
+                    triggerKeys = triggerKeys.toggling(key: .lalt, allowShiftAlone: allowShiftAlone)
+                }.buttonStyle(ToggleButton(isOn: laltTrigger, radius: radius, noFG: noFG))
+                    .accessibilityLabel("Left Option")
+                    .overlay(Color.red.opacity(triggerKeys.contains(.alt) ? 0.1 : 0.0).clipShape(RoundedRectangle(cornerRadius: radius, style: .continuous)))
+                Button("⌘") {
+                    triggerKeys = triggerKeys.toggling(key: .lcmd, allowShiftAlone: allowShiftAlone)
+                }.buttonStyle(ToggleButton(isOn: lcmdTrigger, radius: radius, noFG: noFG))
+                    .accessibilityLabel("Left Command")
+                    .overlay(Color.red.opacity(triggerKeys.contains(.cmd) ? 0.1 : 0.0).clipShape(RoundedRectangle(cornerRadius: radius, style: .continuous)))
+                Button(action: {}) {
+                    Text("")
+                        .frame(maxWidth: spacebarFullWidth ? .infinity : nil)
+                        .padding(.horizontal, spacebarFullWidth ? 0 : 16)
+                }
+                .buttonStyle(ToggleButton(isOn: .constant(false), radius: radius, noFG: noFG))
+                .padding(.horizontal, spacebarFullWidth ? 8 : 0)
+                .opacity(0.9)
+                .disabled(true)
+                // The spacebar only completes the drawing of a keyboard.
+                .accessibilityHidden(true)
+                Button("⌘") {
+                    triggerKeys = triggerKeys.toggling(key: .rcmd, allowShiftAlone: allowShiftAlone)
+                }.buttonStyle(ToggleButton(isOn: rcmdTrigger, radius: radius, noFG: noFG))
+                    .accessibilityLabel("Right Command")
+                    .overlay(Color.red.opacity(triggerKeys.contains(.cmd) ? 0.1 : 0.0).clipShape(RoundedRectangle(cornerRadius: radius, style: .continuous)))
+                Button("⌥") {
+                    triggerKeys = triggerKeys.toggling(key: .ralt, allowShiftAlone: allowShiftAlone)
+                }.buttonStyle(ToggleButton(isOn: raltTrigger, radius: radius, noFG: noFG))
+                    .accessibilityLabel("Right Option")
+                    .overlay(Color.red.opacity(triggerKeys.contains(.alt) ? 0.1 : 0.0).clipShape(RoundedRectangle(cornerRadius: radius, style: .continuous)))
+                Button("⌃") {
+                    triggerKeys = triggerKeys.toggling(key: .rctrl, allowShiftAlone: allowShiftAlone)
+                }.buttonStyle(ToggleButton(isOn: rctrlTrigger, radius: radius, noFG: noFG))
+                    .accessibilityLabel("Right Control")
+                    .overlay(Color.red.opacity(triggerKeys.contains(.ctrl) ? 0.1 : 0.0).clipShape(RoundedRectangle(cornerRadius: radius, style: .continuous)))
+            }
+            .fixedSize(horizontal: !spacebarFullWidth, vertical: true)
+            .size(size: $commonModifiersRowSize)
+        }
+
+        @State private var commonModifiersRowSize: CGSize = .zero
+
+    }
+
+    import Carbon
+
+    public extension KeyCombo {
+        var modifierFlags: NSEvent.ModifierFlags {
+            keyEquivalentModifierMask.subtracting(.uselessModifier)
+        }
+    }
+    public extension String {
+        var sauceKey: SauceKey? {
+            SauceKey.charToPhysicalKeyMapping[self]
+        }
+        var sauceKeyNonOptional: SauceKey {
+            sauceKey
+                ?? SauceKey(character: self, virtualKeyCode: nil)
+                ?? .section
+        }
+        var QWERTYSauceKey: SauceKey? {
+            switch self {
+            case SauceKey.return.lowercasedChar: .return
+            case SauceKey.space.lowercasedChar: .space
+            default:
+                SauceKey(character: self, virtualKeyCode: nil)
+            }
+        }
+        var QWERTYSauceKeyNonOptional: SauceKey? {
+            QWERTYSauceKey ?? .section
+        }
+    }
+
+    extension SauceKey: Defaults.Serializable {}
+    public extension SauceKey {
+        var QWERTYKey: SauceKey {
+            SauceKey(character: uppercasedChar, virtualKeyCode: nil) ??
+                SauceKey(character: QWERTYCharacter, virtualKeyCode: nil) ??
+                .section
+        }
+
+        static var charToPhysicalKeyMapping: [String: SauceKey] = (SauceKey.ALL_KEYS + [.space, .return, .escape]).dict { key in
+            (key.lowercasedChar, key)
+        }
+        var uppercasedChar: String {
+            memoz.character.uppercased()
+        }
+        var lowercasedChar: String {
+            memoz.character.lowercased()
+        }
+        var character: String {
+            let char = switch self {
+            case .underscore:
+                Sauce.shared.character(for: SauceKey.minus.QWERTYKeyCode.i, modifiers: .cocoa([.shift]))?.uppercased() ?? rawValue.uppercased()
+            default:
+                switch QWERTYKeyCode.i {
+                case kVK_Return: "⏎"
+                case kVK_Space: "⎵"
+                default: Sauce.shared.character(for: QWERTYKeyCode.i, modifiers: .none)?.uppercased() ?? rawValue.uppercased()
+                }
+            }
+
+            if char.count > 1 {
+                switch char {
+                case "ONE": return "1"
+                case "TWO": return "2"
+                case "THREE": return "3"
+                case "FOUR": return "4"
+                case "FIVE": return "5"
+                case "SIX": return "6"
+                case "SEVEN": return "7"
+                case "EIGHT": return "8"
+                case "NINE": return "9"
+                case "ZERO": return "0"
+                default: return char
+                }
+            }
+
+            return char
+        }
+
+        var lowQWERTYCharacter: String { QWERTYCharacter.lowercased() }
+        var QWERTYCharacter: String {
+            switch QWERTYKeyCode.i {
+            case kVK_ANSI_0: "0"
+            case kVK_ANSI_1: "1"
+            case kVK_ANSI_2: "2"
+            case kVK_ANSI_3: "3"
+            case kVK_ANSI_4: "4"
+            case kVK_ANSI_5: "5"
+            case kVK_ANSI_6: "6"
+            case kVK_ANSI_7: "7"
+            case kVK_ANSI_8: "8"
+            case kVK_ANSI_9: "9"
+            case kVK_ISO_Section: "§"
+            case kVK_ANSI_Equal: "="
+            case kVK_ANSI_Minus: "-"
+            case kVK_ANSI_RightBracket: "]"
+            case kVK_ANSI_LeftBracket: "["
+            case kVK_ANSI_Quote: "'"
+            case kVK_ANSI_Semicolon: ";"
+            case kVK_ANSI_Backslash: "\\"
+            case kVK_ANSI_Comma: ","
+            case kVK_ANSI_Slash: "/"
+            case kVK_ANSI_Period: "."
+            case kVK_ANSI_Grave: "`"
+            case kVK_Return: "⏎"
+            case kVK_Space: "⎵"
+            default: rawValue.uppercased()
+            }
+        }
+    }
+
+#endif

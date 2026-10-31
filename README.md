@@ -66,22 +66,12 @@ Integrate Clop optimisation in your workflows through **native macOS Shortcuts**
 - ..and so on
 
 
-## Free vs Pro
+## Features
 
-Free version features are free **forever**.
-
-After the **14-day trial**, the app will continue to work with the free features.
-
-
-| Feature | Clop Pro | Free version |
-|---------|----------|--------------|
-| Clipboard optimisation | ✅ | ✅ |
-| Downscale images | ✅ | ✅ |
-| Optimise screen recordings | ✅ | 5 per session |
-| Optimise screenshot files | ✅ | 5 per session |
-| On-demand optimisation | ✅ | 5 per session |
-| Shortcuts support | ✅ | 5 per session |
-
+This build includes all features without a purchase, trial, or per-session optimisation limits.
+MCP access and script execution remain controlled by the settings you choose.
+WarpDrop link sharing is excluded from this build.
+The local package in `Packages/Lowtech` provides shared UI, updates, and crash reporting without payment or licensing dependencies.
 
 ## Technical details
 

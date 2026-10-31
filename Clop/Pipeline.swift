@@ -714,8 +714,8 @@ extension Optimiser {
             await exec.handleRunShortcut(shortcut: shortcut)
         case let .copyToClipboard(format, relativeTo):
             exec.handleCopyToClipboard(format: format, relativeTo: relativeTo)
-        case let .copyLinkForSending(expiration):
-            await exec.handleCopyLinkForSending(expiration: expiration)
+        case .copyLinkForSending:
+            throw NSError(domain: "Clop.Pipeline", code: 1, userInfo: [NSLocalizedDescriptionKey: "Secure link sharing is unavailable in this build. Remove copyLinkForSending from this pipeline."])
         case let .fork(location):
             await exec.handleFork(location: location, followingSteps: Array(pipeline.steps.dropFirst(stepIndex + 1)))
         case let .shelveWith(app):

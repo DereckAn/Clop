@@ -1,0 +1,94 @@
+//
+//  LocalMachPort.swift
+//  Clop
+//
+//  Created by Alin Panaitiu on 24.09.2023.
+//
+
+import Cocoa
+import Foundation
+import os
+import System
+
+private let logger = Logger(subsystem: lowtechLogSubsystem, category: "LocalMachPort")
+
+// MARK: - LocalMachPort
+
+public final class LocalMachPort {
+    public init(portLocation: String) {
+        self.portLocation = portLocation as CFString
+        NotificationCenter.default.addObserver(forName: NSApplication.willTerminateNotification, object: nil, queue: .main) { _ in
+            if let port = self.port {
+                CFMessagePortInvalidate(port)
+            }
+        }
+    }
+
+    public func listen(_ action: @escaping ((Data?) -> Unmanaged<CFData>?)) {
+        self.action = action
+
+        let selfPointer = UnsafeMutablePointer<LocalMachPort>.allocate(capacity: 1)
+        selfPointer.initialize(to: self)
+
+        context = CFMessagePortContext(version: 0, info: selfPointer, retain: nil, release: nil, copyDescription: nil)
+        port = CFMessagePortCreateLocal(nil, portLocation, { _, _, data, selfPointer in
+            selfPointer?.assumingMemoryBound(to: LocalMachPort.self).pointee.action?(data as Data?)
+        }, &context, nil)
+
+        guard let port else {
+            return
+        }
+        portRunLoop = CFMessagePortCreateRunLoopSource(nil, port, 0)
+        CFRunLoopAddSource(CFRunLoopGetCurrent(), portRunLoop, .defaultMode)
+    }
+
+    public func sendAndWait(data: Data? = nil, sendTimeout: TimeInterval = 5, recvTimeout: TimeInterval = 600) throws -> Data? {
+        try send(data: data, sendTimeout: sendTimeout, recvTimeout: recvTimeout, wait: true)
+    }
+
+    public func sendAndForget(data: Data? = nil, sendTimeout: TimeInterval = 5, recvTimeout: TimeInterval = 600) throws {
+        try send(data: data, sendTimeout: sendTimeout, recvTimeout: recvTimeout, wait: false)
+    }
+
+    var portLocation: CFString!
+    var port: CFMessagePort!
+    var portRunLoop: CFRunLoopSource!
+    var action: ((Data?) -> Unmanaged<CFData>?)?
+    var context: CFMessagePortContext!
+
+    var semaphore = DispatchSemaphore(value: 1)
+
+    @discardableResult
+    private func send(data: Data? = nil, sendTimeout: TimeInterval = 5, recvTimeout: TimeInterval = 600, wait: Bool = true) throws -> Data? {
+        semaphore.wait()
+
+        guard let port = CFMessagePortCreateRemote(nil, portLocation) else {
+            semaphore.signal()
+            let err = "Could not create port \(portLocation!)"
+            logger.error("\(err)")
+            throw err.err
+        }
+        semaphore.signal()
+
+        logger.debug("Sending \(data?.s ?? String(describing: data)) to port \(self.portLocation!)")
+        var returnData: Unmanaged<CFData>?
+        let err = CFMessagePortSendRequest(
+            port, Int32.random(in: 1 ... 100_000),
+            data as CFData?, sendTimeout, recvTimeout,
+            wait ? CFRunLoopMode.defaultMode.rawValue : nil, &returnData
+        )
+        guard err == KERN_SUCCESS else {
+            let err = "Could not send data to port \(portLocation!) (error: \(err))"
+            logger.error("\(err)")
+            throw err.err
+        }
+
+        return returnData?.takeRetainedValue() as? Data
+    }
+}
+
+public extension String {
+    var err: NSError {
+        NSError(domain: self, code: 1)
+    }
+}

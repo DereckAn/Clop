@@ -391,7 +391,7 @@ class FileOptimisationWatcher {
         }
 
         DebugDump.record("[fsevent] >>> optimising \(path.string) (\(fileType.description) watcher)")
-        try? await proGuard(count: optimisedCount, url: path.url) {
+        try? await withOptimisationTools {
             self.handler(path)
         }
         alreadyOptimisedFileRemovers[oldPath.string]?.cancel()
@@ -408,8 +408,6 @@ class FileOptimisationWatcher {
             }
         }
     }
-
-    private let optimisedCount = OptimisationCounter()
 
     private func startWatching(existingPaths: [String]) {
         guard !existingPaths.isEmpty else { return }
